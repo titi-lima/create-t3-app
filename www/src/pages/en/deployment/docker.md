@@ -60,60 +60,64 @@ README.md
 <div class="content">
 
 ```docker
-##### DEPENDENCIES
-
-FROM --platform=linux/amd64 node:20-alpine AS deps
+##### BASE
+FROM --platform=linux/amd64 node:20-alpine AS base
 RUN apk add --no-cache libc6-compat openssl
 WORKDIR /app
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+RUN corepack enable
 
-# Install Prisma Client - remove if not using Prisma
-
-COPY prisma ./
+##### DEPENDENCIES
+FROM base AS deps-builder
 
 # Install dependencies based on the preferred package manager
 
 COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml\* ./
 
-RUN \
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     if [ -f yarn.lock ]; then yarn --frozen-lockfile; \
     elif [ -f package-lock.json ]; then npm ci; \
-    elif [ -f pnpm-lock.yaml ]; then yarn global add pnpm && pnpm i; \
+    elif [ -f pnpm-lock.yaml ]; then pnpm i --frozen-lockfile; \
     else echo "Lockfile not found." && exit 1; \
     fi
 
-##### BUILDER
+# Install Prisma Client - remove if not using Prisma
 
-FROM --platform=linux/amd64 node:20-alpine AS builder
+COPY prisma ./
+
+RUN pnpm run generate
+
+##### BUILD
+
 ARG DATABASE_URL
 ARG NEXT_PUBLIC_CLIENTVAR
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
 
 # ENV NEXT_TELEMETRY_DISABLED 1
 
-RUN \
+COPY . .
+
+RUN --mount=type=cache,id=nextjs,target=/app/.next/cache \
     if [ -f yarn.lock ]; then SKIP_ENV_VALIDATION=1 yarn build; \
     elif [ -f package-lock.json ]; then SKIP_ENV_VALIDATION=1 npm run build; \
-    elif [ -f pnpm-lock.yaml ]; then yarn global add pnpm && SKIP_ENV_VALIDATION=1 pnpm run build; \
+    elif [ -f pnpm-lock.yaml ]; then SKIP_ENV_VALIDATION=1 pnpm run build; \
     else echo "Lockfile not found." && exit 1; \
     fi
 
 ##### RUNNER
 
-FROM --platform=linux/amd64 gcr.io/distroless/nodejs20-debian12 AS runner
-WORKDIR /app
+FROM base AS runner
 
 ENV NODE_ENV production
 
 # ENV NEXT_TELEMETRY_DISABLED 1
 
-COPY --from=builder /app/next.config.js ./
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/package.json ./package.json
+COPY --from=deps-builder /app/next.config.js ./
+COPY --from=deps-builder /app/public ./public
+COPY --from=deps-builder /app/package.json ./package.json
 
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+COPY --from=deps-builder /app/.next/standalone ./
+COPY --from=deps-builder /app/.next/static ./.next/static
 
 EXPOSE 3000
 ENV PORT 3000
